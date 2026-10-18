@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.Room" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/room_bg</item>
+        <item name="android:statusBarColor">@color/room_bg</item>
+        <item name="android:navigationBarColor">@color/room_bg</item>
+    </style>
+    <color name="room_bg">#FF12100E</color>
+    <color name="room_signal">#FFF5CB2E</color>
+</resources>
