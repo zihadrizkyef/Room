@@ -8,6 +8,7 @@ class RequirementsTest {
     @Test fun acceptsOnlyOrbitNebula() {
         assertTrue(Requirements.isRequiredSsid("\"OrbitNebula\""))
         assertTrue(Requirements.isRequiredSsid("OrbitNebula"))
+        assertTrue(Requirements.isRequiredSsid("\"Orbit Nebula\""))
         assertFalse(Requirements.isRequiredSsid("\"OrbitNebula_5G\""))
         assertFalse(Requirements.isRequiredSsid("\"Rumah\""))
         assertFalse(Requirements.isRequiredSsid("<unknown ssid>"))

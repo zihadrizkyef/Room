@@ -15,7 +15,10 @@ object Requirements {
 
     fun cleanSsid(raw: String?) = raw?.trim()?.removeSurrounding("\"").orEmpty()
 
-    fun isRequiredSsid(raw: String?) = !isUnknownSsid(raw) && cleanSsid(raw) == WIFI_SSID
+    /** MiFi-nya terdaftar sebagai "Orbit Nebula" (pakai spasi), jadi spasi & huruf besar/kecil diabaikan. */
+    fun isRequiredSsid(raw: String?) = !isUnknownSsid(raw) && squash(cleanSsid(raw)) == squash(WIFI_SSID)
+
+    private fun squash(s: String) = s.filter { it.isLetterOrDigit() }.lowercase()
 
     /** Nama Bluetooth boleh ditulis "X2PLUS", "X2 Plus", "x2-plus", dst. */
     fun isIntercomName(name: CharSequence?): Boolean {
