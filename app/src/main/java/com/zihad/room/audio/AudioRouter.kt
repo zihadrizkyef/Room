@@ -1,6 +1,7 @@
 package com.zihad.room.audio
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -9,6 +10,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import com.zihad.room.Requirements
 
 /**
  * Mengarahkan mic & suara ke intercom Bluetooth (mode telepon / SCO).
@@ -16,11 +18,15 @@ import androidx.core.content.ContextCompat
  * Versi lama memakai startBluetoothSco() yang async dan bisa gagal diam-diam — akibatnya
  * Android memakai mic HP di saku (angin + mesin masuk). Di sini Android 12+ memakai
  * setCommunicationDevice(), dan rute yang *benar-benar* dipakai dilaporkan ke UI.
+ *
+ * Hanya intercom [Requirements.INTERCOM_NAME] yang dipakai; Bluetooth lain (headset, mobil)
+ * diabaikan walau sedang tersambung.
  */
 class AudioRouter(private val context: Context, private val onChanged: () -> Unit) {
     private val am = context.getSystemService(AudioManager::class.java)
     private var scoReceiver: BroadcastReceiver? = null
     private var commListener: Any? = null   // OnCommunicationDeviceChangedListener (API 31+)
+    private var scoRequested = false          // startBluetoothSco dihitung per panggilan; jangan dobel
 
     fun start() {
         am.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -39,27 +45,48 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
         connectBluetooth()
     }
 
-    /** Coba pindahkan ke intercom. Mengembalikan false kalau tidak ada perangkat BT. */
+    /** Coba pindahkan ke intercom. Mengembalikan false kalau intercom yang diminta tidak tersambung. */
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
     fun connectBluetooth(): Boolean {
         if (Build.VERSION.SDK_INT >= 31) {
             val devices = am.availableCommunicationDevices
-            val bt = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-                ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
+            val bt = devices.firstOrNull { isBluetooth(it) && isIntercom(it) }
             if (bt != null) return am.setCommunicationDevice(bt)
-            devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }?.let { am.setCommunicationDevice(it) }
+            if (am.communicationDevice?.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }?.let { am.setCommunicationDevice(it) }
+            }
             return false
         }
-        val hasBt = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+        val hasBt = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { isBluetooth(it) && isIntercom(it) }
         if (hasBt) {
-            am.isSpeakerphoneOn = false
-            am.startBluetoothSco()
-            am.isBluetoothScoOn = true
+            if (!scoRequested) {
+                am.isSpeakerphoneOn = false
+                am.startBluetoothSco()
+                am.isBluetoothScoOn = true
+                scoRequested = true
+            }
         } else {
+            if (scoRequested) { am.stopBluetoothSco(); am.isBluetoothScoOn = false; scoRequested = false }
             am.isSpeakerphoneOn = true
         }
         return hasBt
+    }
+
+    /**
+     * Apakah [d] adalah intercom yang diwajibkan. Nama dari AudioDeviceInfo kadang berisi nama HP
+     * sendiri (bukan nama perangkat BT), jadi alamat perangkat yang sudah dipasangkan ikut dicek.
+     */
+    @SuppressLint("MissingPermission")
+    fun isIntercom(d: AudioDeviceInfo?): Boolean {
+        if (d == null || !isBluetooth(d)) return false
+        if (Requirements.isIntercomName(d.productName)) return true
+        if (Build.VERSION.SDK_INT < 28) return false
+        val addr = d.address.takeIf { it.isNotBlank() } ?: return false
+        return try {
+            context.getSystemService(BluetoothManager::class.java)?.adapter?.bondedDevices.orEmpty()
+                .any { it.address.equals(addr, ignoreCase = true) && Requirements.isIntercomName(it.name) }
+        } catch (_: SecurityException) { false }   // izin BLUETOOTH_CONNECT ditolak: cukup andalkan nama
     }
 
     /** Perangkat output komunikasi saat ini (Android 12+), untuk label UI. */
@@ -77,6 +104,7 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
             scoReceiver?.let { context.unregisterReceiver(it) }
             scoReceiver = null
             am.stopBluetoothSco()
+            scoRequested = false
             am.isBluetoothScoOn = false
             am.isSpeakerphoneOn = false
         }

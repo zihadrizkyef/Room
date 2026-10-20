@@ -5,6 +5,9 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+// Rilis dibuat CI dari tag "v<N>": N = versionCode. Lokal default 1.
+val appVersionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
+
 android {
     namespace = "com.zihad.room"
     compileSdk = 36
@@ -12,12 +15,27 @@ android {
         applicationId = "com.zihad.room"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "2.0"
+        versionCode = appVersionCode
+        versionName = "2.$appVersionCode"
+    }
+    // Semua HP harus memakai kunci yang sama supaya update bisa menimpa. Kunci rilis dari env (CI);
+    // tanpa env, build lokal memakai kunci debug seperti biasa.
+    signingConfigs {
+        create("release") {
+            val path = System.getenv("ROOM_KEYSTORE")
+            if (path != null) {
+                storeFile = file(path)
+                storePassword = System.getenv("ROOM_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ROOM_KEY_ALIAS")
+                keyPassword = System.getenv("ROOM_KEYSTORE_PASSWORD")
+            }
+        }
     }
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = if (System.getenv("ROOM_KEYSTORE") != null) signingConfigs.getByName("release")
+                else signingConfigs.getByName("debug")
         }
     }
     compileOptions {

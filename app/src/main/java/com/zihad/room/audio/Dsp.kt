@@ -47,19 +47,28 @@ class HighPass(sampleRate: Int, cutoffHz: Double = 150.0) {
  * Lantai bising diikuti otomatis — turun cepat, naik pelan — jadi angin/mesin yang stabil
  * lama-lama dianggap latar, dan suara orang yang lebih keras dari itu membuka gerbang.
  * Setelah bicara, gerbang tetap terbuka [hangoverFrames] supaya ujung kata tidak terpotong.
+ *
+ * Saat gerbang terbuka lantai naik jauh lebih lambat ([floorRiseWhileOpenDbPerFrame]). Kalau tidak,
+ * nyanyian/obrolan yang panjang ikut "dipelajari" sebagai bising, selisihnya ke lantai menyusut
+ * di bawah ambang, dan gerbang menutup di tengah kalimat → suara putus-putus.
  */
 class VoiceGate(
     private val hangoverFrames: Int,
     private val openAboveFloorDb: Double = 7.0,
     private val minOpenDb: Double = -52.0,
     private val floorRiseDbPerFrame: Double = 0.02,
+    private val floorRiseWhileOpenDbPerFrame: Double = 0.005,
 ) {
-    private var floorDb = -60.0
+    private var floorDb = Double.NaN
     private var hang = 0
 
     fun isOpen(buf: ShortArray): Boolean {
         val db = Dsp.dbfs(buf)
-        floorDb = if (db < floorDb) db else floorDb + floorRiseDbPerFrame
+        // Frame pertama = perkiraan awal lantai; tanpa ini mesin yang sudah hidup dikirim terus
+        // sampai lantai (mulai -60 dB) pelan-pelan naik menyusul.
+        if (floorDb.isNaN()) floorDb = db
+        val rise = if (hang > 0) floorRiseWhileOpenDbPerFrame else floorRiseDbPerFrame
+        floorDb = if (db < floorDb) db else floorDb + rise
         if (db > floorDb + openAboveFloorDb && db > minOpenDb) hang = hangoverFrames
         else if (hang > 0) hang--
         return hang > 0

@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.content.ContextCompat
+import com.zihad.room.audio.MediaButton
 import com.zihad.room.ui.MainActivity
 
 /**
@@ -24,6 +25,7 @@ class RoomService : Service() {
     private val wifiLocks = mutableListOf<WifiManager.WifiLock>()
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var mediaButton: MediaButton? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -38,11 +40,14 @@ class RoomService : Service() {
         if (Room.engine == null) {
             acquireLocks()
             Room.engine = RoomEngine(applicationContext).also { it.start() }
+            mediaButton = MediaButton(applicationContext) { Room.toggleMute(); Room.state.value.muted }
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        mediaButton?.release()
+        mediaButton = null
         Room.engine?.stop()
         Room.engine = null
         wifiLocks.forEach { if (it.isHeld) it.release() }

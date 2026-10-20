@@ -60,6 +60,16 @@ class DspTest {
         assertTrue(gate.isOpen(louder))
     }
 
+    @Test fun voiceGateStaysOpenThroughLongContinuousSinging() {
+        val gate = VoiceGate(hangoverFrames = 20)
+        val quiet = ShortArray(320) { if (it % 2 == 0) 30 else -30 }
+        val singing = ShortArray(320) { (6000 * sin(2 * PI * 300 * it / 16000)).toInt().toShort() }
+        repeat(50) { gate.isOpen(quiet) }
+        assertTrue(gate.isOpen(singing))
+        // 30 detik bernyanyi tanpa jeda tidak boleh membuat gerbang menutup di tengah.
+        repeat(30 * 50) { assertTrue("frame $it", gate.isOpen(singing)) }
+    }
+
     @Test fun levelIsZeroForSilence() {
         assertEquals(0f, Dsp.level(ShortArray(160)), 0f)
         assertTrue(Dsp.level(tone(440.0, 160)) > 0.5f)

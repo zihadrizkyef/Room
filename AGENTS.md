@@ -41,8 +41,15 @@ design/Room Prototype.html  mockup acuan visual; token warna di RoomScreen.kt be
 - **Gerbang suara:** saat tidak ada yang bicara, tidak ada paket AUDIO sama sekali. Hangover 400 ms.
   Frame pertama setelah diam diberi flag `FLAG_TALK_START` (di field `time`) supaya jeda yang disengaja
   tidak dianggap gangguan WiFi oleh jitter buffer.
-- **Jitter buffer:** target 2–5 frame (40–100 ms). Kelebihan dibuang; kosong singkat menaikkan target,
+- **Jitter buffer:** target 2–8 frame (40–160 ms). Kelebihan dibuang; kosong singkat menaikkan target,
   10 detik stabil menurunkannya. Loss disembunyikan dengan pengulangan frame yang dikecilkan.
+- **WiFi & Bluetooth wajib:** hanya WiFi `OrbitNebula` dan intercom `X2PLUS` (lihat `Requirements.kt`).
+  Salah satu tidak sesuai → tidak ada paket dikirim/diterima dan tidak ada suara diputar; UI menjelaskan
+  sebabnya. SSID hanya terbaca dengan izin Lokasi + layanan Lokasi nyala. Socket dikunci ke jaringan
+  WiFi itu (`Network.bindSocket`) supaya paket tidak lari ke data seluler. Kirim audio tetap ke peer yang
+  ditandai "terputus" (PING/HELLO yang hilang tidak boleh menghentikan suara).
+- Diagnosis: engine mencatat statistik per peer tiap 5 detik (`adb logcat -s Room`): `missing`/`late`/
+  `overflow` jitter buffer, rtt, target. Pakai ini sebelum menebak penyebab putus-putus.
 - Paket diberi **DSCP EF** (`0xB8`) supaya masuk antrean voice WMM.
 - Mic: `VOICE_COMMUNICATION`, NoiseSuppressor HP **nyala**, AutomaticGainControl **mati**.
 - Android 12+: `setCommunicationDevice()`. Android ≤ 11: `startBluetoothSco()`. Mic yang *benar-benar*
@@ -74,6 +81,17 @@ export JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"   # Windows; JDK 
 - Di Git Bash, set `MSYS_NO_PATHCONV=1` sebelum `adb shell` dengan path `/sdcard/...`.
 - Ukur jaringan dari HP: `adb shell ping -c 30 -i 0.2 <ip>` — bandingkan Room jalan vs mati.
 - Jangan klaim kualitas suara membaik tanpa uji di jalan dengan intercom tersambung.
+
+## Rilis & update otomatis
+
+- Push tag `v<N>` (N = versionCode, naik terus; mis. `v2`) → `.github/workflows/release.yml` membangun APK
+  bertanda tangan dan membuat Release dengan asset `room.apk`.
+- Aplikasi (`update/Updater.kt`) cek Release terbaru tiap dibuka, unduh diam-diam, lalu memasang saat dibuka
+  lagi atau saat Stop — tidak pernah di tengah obrolan. Android 12+ tanpa dialog (setelah izin "pasang
+  aplikasi" diberikan sekali); Android 11 ke bawah minta satu ketukan.
+- Kunci rilis ada di luar repo (`~/.room-signing`) dan di GitHub secrets `ROOM_KEYSTORE_B64` +
+  `ROOM_KEYSTORE_PASSWORD`. Jangan hilang/diganti: kunci beda = HP harus uninstall dulu.
+- Aturan WiFi/Bluetooth sengaja tidak memblokir bila tidak bisa diverifikasi (izin Lokasi ditolak): demi 1 klik.
 
 ## Gaya kode
 

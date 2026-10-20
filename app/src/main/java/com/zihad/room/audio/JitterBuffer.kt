@@ -29,6 +29,12 @@ class JitterBuffer(
     private var emptyFor = 0
     private var calmFor = 0
 
+    /** Penghitung kumulatif untuk diagnosis di jalan (lihat log "Room"). */
+    @Volatile var played = 0L; private set
+    @Volatile var missing = 0L; private set     // frame tidak datang tepat waktu → disembunyikan
+    @Volatile var late = 0L; private set        // datang setelah waktunya diputar → dibuang
+    @Volatile var overflow = 0L; private set    // dibuang karena antrean kelebihan
+
     /** Kedalaman target saat ini, dalam frame. */
     @Volatile var target = minDepth
         private set
@@ -40,7 +46,7 @@ class JitterBuffer(
     @Synchronized
     fun push(seq: Int, frame: ShortArray, talkStart: Boolean = false) {
         if (talkStart && !(playing && hasData)) emptyFor = 0
-        if (playing && seq - nextSeq < 0) return            // telat, sudah lewat waktunya
+        if (playing && seq - nextSeq < 0) { late++; return }   // telat, sudah lewat waktunya
         if (hasData && !playing && seq - nextSeq < 0 && nextSeq - seq < CAPACITY) nextSeq = seq
         if (!hasData || seq - highestSeq > CAPACITY) {     // aliran baru / lompatan besar
             reset()
@@ -72,6 +78,7 @@ class JitterBuffer(
             val skip = depth - target
             for (s in 0 until skip) take(nextSeq + s)
             nextSeq += skip
+            overflow += skip
         }
 
         if (highestSeq - nextSeq < 0) {                     // habis: pengirim diam / putus
@@ -85,6 +92,7 @@ class JitterBuffer(
         nextSeq++
         if (frame != null) {
             concealed = 0
+            played++
             lastFrame = frame
             if (++calmFor >= calmFramesToShrink) { calmFor = 0; if (target > minDepth) target-- }
             return frame
@@ -92,6 +100,7 @@ class JitterBuffer(
 
         // Paket hilang: ulangi frame terakhir sambil dikecilkan supaya tidak "klik".
         calmFor = 0
+        missing++
         val last = lastFrame ?: return ShortArray(0)
         concealed++
         if (concealed > MAX_CONCEAL) return ShortArray(last.size)

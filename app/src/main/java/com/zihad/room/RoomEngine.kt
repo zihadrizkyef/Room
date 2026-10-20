@@ -8,6 +8,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.net.Network
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
@@ -24,6 +25,9 @@ import com.zihad.room.audio.JitterBuffer
 import com.zihad.room.audio.VoiceGate
 import com.zihad.room.net.Packet
 import com.zihad.room.net.PacketType
+import com.zihad.room.net.WifiCheck
+import com.zihad.room.net.WifiGuard
+import com.zihad.room.net.WifiStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.net.DatagramPacket
@@ -49,6 +53,8 @@ data class RoomState(
     val micRoute: MicRoute = MicRoute.UNKNOWN,
     val micLabel: String = "",
     val peers: List<PeerUi> = emptyList(),
+    val wifi: WifiStatus = WifiStatus.OK,
+    val wifiName: String = "",
     val error: String? = null,
 )
 
@@ -80,7 +86,7 @@ class RoomEngine(private val context: Context) {
         @Volatile var lastSeen = SystemClock.elapsedRealtime()
         @Volatile var rttMs: Int? = null
         @Volatile var level = 0f
-        val buffer = JitterBuffer(minDepth = 2, maxDepth = 5, calmFramesToShrink = 500, shortGapFrames = 15)
+        val buffer = JitterBuffer(minDepth = 2, maxDepth = 8, calmFramesToShrink = 500, shortGapFrames = 15)
         val lost get() = SystemClock.elapsedRealtime() - lastSeen > LOST_AFTER_MS
     }
 
@@ -101,6 +107,12 @@ class RoomEngine(private val context: Context) {
     @Volatile private var myLevel = 0f
     @Volatile private var talking = false
     @Volatile private var micDevice: AudioDeviceInfo? = null
+    @Volatile private var wifi = WifiCheck(WifiStatus.NO_WIFI)
+    @Volatile private var intercomOk = false
+    private var boundNetwork: Network? = null
+
+    /** Suara hanya jalan kalau WiFi dan intercom yang diwajibkan sama-sama benar. */
+    private val canTalk get() = wifi.status == WifiStatus.OK && intercomOk
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -112,6 +124,7 @@ class RoomEngine(private val context: Context) {
                 trafficClass = DSCP_EF
                 bind(InetSocketAddress(PORT))
             }
+            refreshWifi()
             openAudio()
         } catch (e: Exception) {
             Log.e(TAG, "Gagal mulai", e)
@@ -194,7 +207,7 @@ class RoomEngine(private val context: Context) {
             if (n < FRAME) { if (n < 0) SystemClock.sleep(10); continue }
             hp.process(frame)
             val open = gate.isOpen(frame)
-            if (muted || !open) { myLevel = 0f; talking = false; wasOpen = false; continue }
+            if (muted || !open || !canTalk) { myLevel = 0f; talking = false; wasOpen = false; continue }
             myLevel = smooth(myLevel, Dsp.level(frame))
             talking = true
             val flags = if (wasOpen) 0L else FLAG_TALK_START
@@ -210,9 +223,12 @@ class RoomEngine(private val context: Context) {
         val frames = ArrayList<ShortArray>(4)
         while (running.get()) {
             frames.clear()
+            val audible = canTalk
             for (p in peers.values) {
                 val f = p.buffer.pop()
-                if (f != null && f.isNotEmpty()) {
+                if (!audible) {
+                    p.level = 0f
+                } else if (f != null && f.isNotEmpty()) {
                     frames += f
                     p.level = smooth(p.level, Dsp.level(f))
                 } else {
@@ -233,7 +249,7 @@ class RoomEngine(private val context: Context) {
         while (running.get()) {
             try { s.receive(dp) } catch (_: Exception) { break }
             val p = Packet.decode(buf, dp.length) ?: continue
-            if (p.room != ROOM || p.sender == myId) continue
+            if (p.room != ROOM || p.sender == myId || wifi.status != WifiStatus.OK) continue
             if (p.type == PacketType.BYE) { peers.remove(p.sender); continue }
 
             var isNew = false
@@ -267,6 +283,8 @@ class RoomEngine(private val context: Context) {
         var tick = 0
         while (running.get()) {
             if (tick % 10 == 0) {
+                refreshWifi()
+                if (!intercomOk && tick % 30 == 0) router.connectBluetooth()   // intercom dinyalakan belakangan
                 val hello = hello()
                 broadcastAddresses().forEach { send(hello, it) }
                 val now = System.nanoTime()
@@ -275,6 +293,7 @@ class RoomEngine(private val context: Context) {
                 peers.values.removeIf { it.lastSeen < cutoff }
             }
             publish()
+            if (tick % 50 == 0) logStats()
             tick++
             SystemClock.sleep(100)
         }
@@ -282,11 +301,14 @@ class RoomEngine(private val context: Context) {
 
     private fun hello() = Packet(PacketType.HELLO, ROOM, myId, name = myName).encode()
 
+    // Tetap kirim ke HP yang ditandai "terputus": PING/HELLO yang hilang sebentar di WiFi jelek
+    // tidak boleh membuat suara kita berhenti dikirim sampai ada paket masuk lagi.
     private fun sendToPeers(data: ByteArray) {
-        for (p in peers.values) if (!p.lost) send(data, p.addr)
+        for (p in peers.values) send(data, p.addr)
     }
 
     private fun send(data: ByteArray, to: InetAddress) {
+        if (wifi.status != WifiStatus.OK) return   // jangan pernah bocor ke WiFi lain
         try { socket?.send(DatagramPacket(data, data.size, to, PORT)) } catch (_: Exception) { }
     }
 
@@ -308,15 +330,17 @@ class RoomEngine(private val context: Context) {
         val mic = micDevice
         val out = router.currentOutput()
         val route = when {
-            AudioRouter.isBluetooth(mic) || (mic == null && AudioRouter.isBluetooth(out)) -> MicRoute.BLUETOOTH
+            router.isIntercom(mic) || (mic == null && router.isIntercom(out)) -> MicRoute.BLUETOOTH
             mic != null -> MicRoute.PHONE
             else -> MicRoute.UNKNOWN
         }
-        val label = when (route) {
-            MicRoute.BLUETOOTH -> "Intercom Bluetooth" + (mic ?: out)?.productName?.toString()
-                ?.takeIf { it.isNotBlank() && it != Build.MODEL }?.let { " · $it" }.orEmpty()
-            MicRoute.PHONE -> "Mic HP (bukan intercom)"
-            MicRoute.UNKNOWN -> "Menyiapkan mic…"
+        intercomOk = route == MicRoute.BLUETOOTH
+        val label = when {
+            route == MicRoute.BLUETOOTH -> "Intercom ${Requirements.INTERCOM_NAME}"
+            route == MicRoute.PHONE && AudioRouter.isBluetooth(mic) ->
+                "Bluetooth lain (${mic?.productName}), bukan ${Requirements.INTERCOM_NAME}"
+            route == MicRoute.PHONE -> "Mic HP, ${Requirements.INTERCOM_NAME} belum tersambung"
+            else -> "Menyiapkan mic…"
         }
         Room.mutableState.value = RoomState(
             running = true,
@@ -330,7 +354,34 @@ class RoomEngine(private val context: Context) {
                 PeerUi(it.id, it.name, if (it.lost) 0f else it.level,
                     it.rttMs?.let { rtt -> rtt / 2 + it.buffer.target * FRAME_MS }, it.lost)
             },
+            wifi = wifi.status,
+            wifiName = wifi.ssid,
         )
+    }
+
+    /** Cek WiFi dan kunci socket ke jaringan OrbitNebula supaya paket tidak lari ke jalur lain. */
+    private fun refreshWifi() {
+        val w = WifiGuard.check(context)
+        val net = w.network.takeIf { w.status == WifiStatus.OK }
+        if (net == null) {
+            boundNetwork = null
+        } else if (net != boundNetwork) {
+            val s = socket
+            if (s != null && runCatching { net.bindSocket(s) }.onFailure { Log.w(TAG, "bindSocket gagal", it) }.isSuccess) {
+                boundNetwork = net
+            }
+        }
+        wifi = w
+    }
+
+    /** Statistik tiap 5 detik: `adb logcat -s Room` setelah uji di jalan untuk melihat sumber putus-putus. */
+    private fun logStats() {
+        Log.i(TAG, "wifi=${wifi.status} ${wifi.ssid} intercom=$intercomOk peers=${peers.size}")
+        for (p in peers.values) {
+            val b = p.buffer
+            Log.i(TAG, "peer=${p.name} lost=${p.lost} rtt=${p.rttMs} target=${b.target} " +
+                "played=${b.played} missing=${b.missing} late=${b.late} overflow=${b.overflow}")
+        }
     }
 
     private fun deviceName(): String =

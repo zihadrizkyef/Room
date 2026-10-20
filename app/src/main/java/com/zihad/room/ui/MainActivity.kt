@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zihad.room.Room
 import com.zihad.room.RoomService
+import com.zihad.room.update.Updater
 
 /** Buka aplikasi = langsung masuk room. Tidak ada layar isian. */
 class MainActivity : ComponentActivity() {
@@ -36,20 +37,24 @@ class MainActivity : ComponentActivity() {
                 state = state,
                 micDenied = micDenied,
                 onToggleMute = Room::toggleMute,
-                onConnectBluetooth = Room::connectBluetooth,
                 onStart = ::ensurePermissionsAndStart,
                 onStop = {
                     RoomService.stop(this)
+                    Updater.install(this)   // obrolan sudah berhenti, aman memasang update
                     finishAndRemoveTask()
                 },
             )
         }
+        // Update yang sudah diunduh sesi lalu dipasang sekarang, sebelum obrolan mulai.
+        if (Room.engine == null && Updater.hasStaged(this) && Updater.install(this)) return
         ensurePermissionsAndStart()
+        Updater.checkInBackground(this)
     }
 
     private fun ensurePermissionsAndStart() {
         val needed = buildList {
             add(Manifest.permission.RECORD_AUDIO)
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
         }.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (needed.isEmpty()) startRoom() else askPermissions.launch(needed.toTypedArray())

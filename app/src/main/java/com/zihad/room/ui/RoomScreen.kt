@@ -42,7 +42,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zihad.room.MicRoute
 import com.zihad.room.PeerUi
+import com.zihad.room.Requirements
 import com.zihad.room.RoomState
+import com.zihad.room.net.WifiStatus
 
 // Token dari design/Room Prototype.html
 private object C {
@@ -67,7 +69,6 @@ fun RoomScreen(
     state: RoomState,
     micDenied: Boolean,
     onToggleMute: () -> Unit,
-    onConnectBluetooth: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -86,7 +87,11 @@ fun RoomScreen(
             return@Column
         }
 
-        RouteCard(state.micRoute, state.micLabel, onConnectBluetooth)
+        if (state.wifi != WifiStatus.OK) {
+            WifiCard(state.wifi, state.wifiName)
+            Spacer(Modifier.height(12.dp))
+        }
+        RouteCard(state.micRoute, state.micLabel)
         Spacer(Modifier.height(20.dp))
 
         LazyColumn(Modifier.weight(1f)) {
@@ -129,7 +134,28 @@ private fun Header(state: RoomState, onStop: () -> Unit) {
 }
 
 @Composable
-private fun RouteCard(route: MicRoute, label: String, onConnectBluetooth: () -> Unit) {
+private fun WifiCard(status: WifiStatus, ssid: String) {
+    val text = when (status) {
+        WifiStatus.NO_WIFI -> "WiFi belum tersambung. Sambungkan HP ke ${Requirements.WIFI_SSID}."
+        WifiStatus.WRONG_NETWORK -> "HP tersambung ke \"$ssid\". Room hanya jalan di WiFi ${Requirements.WIFI_SSID}."
+        WifiStatus.OK -> return
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(C.warnSurface)
+            .padding(16.dp)
+    ) {
+        Text("WIFI", style = Eyebrow)
+        Text(text, color = C.ink, fontSize = 17.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = 4.dp))
+        Text("Suara belum dikirim maupun diputar.", color = C.muted, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
+@Composable
+private fun RouteCard(route: MicRoute, label: String) {
     val warn = route == MicRoute.PHONE
     Row(
         Modifier
@@ -145,18 +171,8 @@ private fun RouteCard(route: MicRoute, label: String, onConnectBluetooth: () -> 
             Text("MIC & SUARA", style = Eyebrow)
             Text(label, color = C.ink, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
             if (warn) {
-                Text("Mic HP yang terpakai — suara angin & mesin akan masuk. Nyalakan intercom & sambungkan Bluetooth-nya.",
+                Text("Room hanya jalan dengan intercom ${Requirements.INTERCOM_NAME}, jadi suara belum dikirim maupun diputar. Nyalakan intercom, sambungannya otomatis.",
                     color = C.ink, fontSize = 15.sp, lineHeight = 20.sp, modifier = Modifier.padding(top = 6.dp))
-                Box(
-                    Modifier
-                        .padding(top = 10.dp)
-                        .height(48.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(C.warn)
-                        .clickable(role = Role.Button, onClick = onConnectBluetooth)
-                        .padding(horizontal = 16.dp),
-                    contentAlignment = Alignment.Center,
-                ) { Text("Sambungkan ke intercom", color = C.signalInk, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
             }
         }
     }
@@ -267,6 +283,6 @@ private fun RoomScreenPreview() {
             micRoute = MicRoute.BLUETOOTH, micLabel = "Intercom Bluetooth",
             peers = listOf(PeerUi(1, "Samsung A15", 0.3f, 42, false), PeerUi(2, "Oppo A58", 0.6f, 48, false)),
         ),
-        micDenied = false, onToggleMute = {}, onConnectBluetooth = {}, onStart = {}, onStop = {},
+        micDenied = false, onToggleMute = {}, onStart = {}, onStop = {},
     )
 }
