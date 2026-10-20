@@ -109,6 +109,7 @@ class RoomEngine(private val context: Context) {
     @Volatile private var micDevice: AudioDeviceInfo? = null
     @Volatile private var wifi = WifiCheck(WifiStatus.NO_WIFI)
     @Volatile private var intercomOk = false
+    @Volatile private var present = true
     private var boundNetwork: Network? = null
 
     /** Suara hanya jalan kalau WiFi dan intercom yang diwajibkan sama-sama benar. */
@@ -284,6 +285,7 @@ class RoomEngine(private val context: Context) {
         while (running.get()) {
             if (tick % 10 == 0) {
                 refreshWifi()
+                present = router.intercomPresent()
                 if (!intercomOk && tick % 30 == 0) router.connectBluetooth()   // intercom dinyalakan belakangan
                 val hello = hello()
                 broadcastAddresses().forEach { send(hello, it) }
@@ -327,9 +329,10 @@ class RoomEngine(private val context: Context) {
 
     private fun publish() {
         if (!running.get()) return
-        val mic = micDevice
+        val mic = record?.routedDevice ?: micDevice
         val out = router.currentOutput()
         val route = when {
+            !present -> if (mic != null) MicRoute.PHONE else MicRoute.UNKNOWN
             router.isIntercom(mic) || (mic == null && router.isIntercom(out)) -> MicRoute.BLUETOOTH
             mic != null -> MicRoute.PHONE
             else -> MicRoute.UNKNOWN

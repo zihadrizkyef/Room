@@ -69,6 +69,16 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
         }
     }
 
+    /**
+     * Android ≤ 11 tidak selalu memberi tahu saat SCO putus (routedDevice tetap menunjuk Bluetooth),
+     * jadi keberadaan intercom dicek ulang ke profil headset. Di Android 12+ rute sudah andal.
+     */
+    fun intercomPresent(): Boolean {
+        if (Build.VERSION.SDK_INT > 30 || headset == null) return true
+        refreshHeadset()
+        return intercomConnected
+    }
+
     @SuppressLint("MissingPermission")
     private fun refreshHeadset() {
         intercomConnected = try {
