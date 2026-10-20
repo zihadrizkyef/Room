@@ -25,9 +25,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -108,11 +110,21 @@ fun RoomScreen(
     }
 }
 
+/** Nomor versi yang sedang jalan (sama dengan tag rilis, mis. v4). */
+@Composable
+private fun versionCode(): Long {
+    val c = LocalContext.current
+    return remember { runCatching { c.packageManager.getPackageInfo(c.packageName, 0).longVersionCode }.getOrDefault(0L) }
+}
+
 @Composable
 private fun Header(state: RoomState, onStop: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("Room", fontFamily = Condensed, fontSize = 36.sp, color = C.ink)
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text("Room", fontFamily = Condensed, fontSize = 36.sp, color = C.ink)
+                Text("v${versionCode()}", style = Eyebrow, modifier = Modifier.padding(start = 8.dp, bottom = 8.dp))
+            }
             if (state.running) {
                 val connected = state.peers.count { !it.lost } + 1
                 Text(if (state.peers.isEmpty()) "WiFi · mencari HP lain" else "WiFi · $connected HP tersambung",
