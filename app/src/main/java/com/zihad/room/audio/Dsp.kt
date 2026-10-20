@@ -62,6 +62,9 @@ class VoiceGate(
     private var floorDb = Double.NaN
     private var hang = 0
 
+    /** Lantai bising saat ini (dBFS) untuk catatan diagnosis. */
+    val floor: Double get() = floorDb
+
     fun isOpen(buf: ShortArray): Boolean {
         val db = Dsp.dbfs(buf)
         // Frame pertama = perkiraan awal lantai; tanpa ini mesin yang sudah hidup dikirim terus

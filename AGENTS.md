@@ -50,6 +50,10 @@ design/Room Prototype.html  mockup acuan visual; token warna di RoomScreen.kt be
   ditandai "terputus" (PING/HELLO yang hilang tidak boleh menghentikan suara).
 - Diagnosis: engine mencatat statistik per peer tiap 5 detik (`adb logcat -s Room`): `missing`/`late`/
   `overflow` jitter buffer, rtt, target. Pakai ini sebelum menebak penyebab putus-putus.
+- **Catatan perjalanan (`FlightLog`):** tiap sesi menulis `ride-*.log` per detik di 
+  `Android/data/com.zihad.room/files/logs/` (baris `S` = HP ini, `P` = tiap peer, `EVT` = kejadian). Ambil dengan 
+  `adb -s <serial> pull /sdcard/Android/data/com.zihad.room/files/logs/` lalu bandingkan 3 HP lewat cap waktu. 
+  Simpan 12 file terakhir. Baca ini dulu sebelum menebak penyebab putus-putus di jalan.
 - Paket diberi **DSCP EF** (`0xB8`) supaya masuk antrean voice WMM.
 - Mic: `VOICE_COMMUNICATION`, NoiseSuppressor HP **nyala**, AutomaticGainControl **mati**.
 - Android 12+: `setCommunicationDevice()`. Android ≤ 11: `startBluetoothSco()`. Mic yang *benar-benar*

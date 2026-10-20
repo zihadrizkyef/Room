@@ -13,8 +13,8 @@ class UpdateReceiver : BroadcastReceiver() {
             PackageInstaller.STATUS_PENDING_USER_ACTION ->
                 intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                     ?.let { context.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-            PackageInstaller.STATUS_SUCCESS -> Unit
-            else -> Updater.discard(context)   // ditolak/gagal (mis. kunci tanda tangan beda): jangan diulang terus
+            PackageInstaller.STATUS_SUCCESS -> Updater.clearInstalling(context)
+            else -> { Updater.clearInstalling(context); Updater.discard(context) }
         }
     }
 }

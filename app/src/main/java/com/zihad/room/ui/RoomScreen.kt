@@ -331,3 +331,20 @@ private fun RoomScreenPreview() {
         micDenied = false, onToggleMute = {}, onStart = {}, onStop = {},
     )
 }
+
+/** Ditampilkan selama update dipasang di latar belakang (bisa puluhan detik), supaya tidak dikira macet. */
+@Composable
+fun UpdatingScreen() {
+    androidx.compose.foundation.layout.Box(
+        Modifier.fillMaxSize().background(C.bg),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            androidx.compose.material3.CircularProgressIndicator(color = C.signal)
+            Text("Memperbarui Room…", color = C.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 20.dp))
+            Text("Tunggu sebentar, aplikasi akan tertutup lalu bisa dibuka lagi.", color = C.muted,
+                fontSize = 14.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp, start = 32.dp, end = 32.dp))
+        }
+    }
+}

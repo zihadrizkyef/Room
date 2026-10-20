@@ -79,6 +79,7 @@ object Updater {
         val c = context.applicationContext
         val file = staged(c)
         if (!hasStaged(c)) return false
+        if (isInstalling(c)) return true
         if (!c.packageManager.canRequestPackageInstalls()) {
             val prefs = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             if (prefs.getBoolean("asked", false)) return false      // jangan menagih terus
@@ -99,6 +100,8 @@ object Updater {
                 }
                 val pi = PendingIntent.getBroadcast(c, id, Intent(c, UpdateReceiver::class.java),
                     PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putLong("installing", System.currentTimeMillis()).apply()
                 s.commit(pi.intentSender)
             }
             true
@@ -106,6 +109,20 @@ object Updater {
     }
 
     fun discard(context: Context) { staged(context).delete() }
+
+    /**
+     * True selama pemasangan masih berjalan di latar belakang (bisa puluhan detik). Dipakai UI untuk
+     * menampilkan "Memperbarui…" dan mencegah sesi pemasangan ganda kalau aplikasi dibuka lagi.
+     * Kedaluwarsa 3 menit supaya tidak macet selamanya kalau hasilnya tidak pernah datang.
+     */
+    fun isInstalling(context: Context): Boolean {
+        val since = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong("installing", 0)
+        return System.currentTimeMillis() - since < 3 * 60_000
+    }
+
+    fun clearInstalling(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove("installing").apply()
+    }
 
     private fun stagedVersion(c: Context): Long? {
         val f = staged(c).takeIf { it.exists() } ?: return null

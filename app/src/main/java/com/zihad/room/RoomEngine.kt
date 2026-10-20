@@ -9,6 +9,8 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.net.Network
+import android.net.wifi.WifiManager
+import android.os.PowerManager
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
@@ -36,7 +38,10 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.util.concurrent.ConcurrentHashMap
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import kotlin.random.Random
 
@@ -86,6 +91,19 @@ class RoomEngine(private val context: Context) {
         @Volatile var lastSeen = SystemClock.elapsedRealtime()
         @Volatile var rttMs: Int? = null
         @Volatile var level = 0f
+        // Untuk catatan perjalanan (FlightLog): dihitung per detik lalu di-reset.
+        val rxAudio = AtomicLong()
+        val rxGapMax = AtomicInteger()
+        val pongs = AtomicLong()
+        val txFrames = AtomicLong()      // frame audio yang KITA kirim ke peer ini
+        val txFail = AtomicLong()
+        // seq hanya naik saat pengirim benar-benar mengirim, jadi lompatan seq = paket hilang di jalan.
+        @Volatile var rxLastSeq = 0
+        @Volatile var rxHasSeq = false
+        val rxLost = AtomicLong()        // kumulatif
+        val rxReorder = AtomicLong()     // kumulatif: datang terlambat/urutan terbalik/dobel
+        @Volatile var lastAudioAt = 0L
+        var wasLost = false
         val buffer = JitterBuffer(minDepth = 2, maxDepth = 8, calmFramesToShrink = 500, shortGapFrames = 15)
         val lost get() = SystemClock.elapsedRealtime() - lastSeen > LOST_AFTER_MS
     }
@@ -112,11 +130,32 @@ class RoomEngine(private val context: Context) {
     @Volatile private var present = true
     private var boundNetwork: Network? = null
 
+    // Catatan perjalanan: penghitung per detik, ditulis tickLoop ke FlightLog lalu di-reset.
+    private var flight: FlightLog? = null
+    private val capFrames = AtomicLong()
+    private val capOpen = AtomicLong()
+    private val capSent = AtomicLong()
+    private val capDb10 = AtomicLong()
+    private val capPeak10 = AtomicInteger(PEAK_NONE)
+    private val capGapMax = AtomicInteger()
+    private val playFrames = AtomicLong()
+    private val playWriteMax = AtomicInteger()
+    private val sendErr = AtomicLong()
+    private val pingSent = AtomicLong()
+    @Volatile private var gateFloor = 0.0
+    @Volatile private var lastSentSeq = -1
+    @Volatile private var micInfo = ""
+    private var lastEvt = ""
+
     /** Suara hanya jalan kalau WiFi dan intercom yang diwajibkan sama-sama benar. */
     private val canTalk get() = wifi.status == WifiStatus.OK && intercomOk
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        flight = FlightLog.open(context, myName).also {
+            it.event("start name=$myName id=$myId model=${Build.MANUFACTURER}_${Build.MODEL} sdk=${Build.VERSION.SDK_INT} " +
+                "app=${runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()}")
+        }
         try {
             router.start()
             socket = DatagramSocket(null).apply {
@@ -143,6 +182,7 @@ class RoomEngine(private val context: Context) {
     fun stop() {
         if (!running.getAndSet(false)) return
         runCatching { sendToPeers(Packet(PacketType.BYE, ROOM, myId).encode()) }
+        flight?.event("stop")
         socket?.close()
         threads.forEach { it.join(500) }
         threads.clear()
@@ -153,6 +193,7 @@ class RoomEngine(private val context: Context) {
         record = null; track = null; noiseSuppressor = null; gainControl = null; socket = null
         router.stop()
         peers.clear()
+        flight?.close(); flight = null
         Room.mutableState.value = RoomState()
     }
 
@@ -203,17 +244,29 @@ class RoomEngine(private val context: Context) {
         val frame = ShortArray(FRAME)
         var seq = 0
         var wasOpen = false
+        var lastRead = SystemClock.elapsedRealtime()
         while (running.get()) {
             val n = rec.read(frame, 0, FRAME)
             if (n < FRAME) { if (n < 0) SystemClock.sleep(10); continue }
+            val now = SystemClock.elapsedRealtime()
+            capGapMax.accumulateAndGet((now - lastRead).toInt()) { a, b -> maxOf(a, b) }
+            lastRead = now
             hp.process(frame)
             val open = gate.isOpen(frame)
+            val db10 = (Dsp.dbfs(frame) * 10).toInt()
+            capFrames.incrementAndGet(); capDb10.addAndGet(db10.toLong())
+            capPeak10.accumulateAndGet(db10) { a, b -> maxOf(a, b) }
+            gateFloor = gate.floor
+            if (open) capOpen.incrementAndGet()
             if (muted || !open || !canTalk) { myLevel = 0f; talking = false; wasOpen = false; continue }
+            capSent.incrementAndGet()
             myLevel = smooth(myLevel, Dsp.level(frame))
             talking = true
             val flags = if (wasOpen) 0L else FLAG_TALK_START
             wasOpen = true
-            sendToPeers(Packet(PacketType.AUDIO, ROOM, myId, seq++, time = flags, pcm = frame).encode())
+            lastSentSeq = seq
+            val data = Packet(PacketType.AUDIO, ROOM, myId, seq++, time = flags, pcm = frame).encode()
+            for (p in peers.values) { if (send(data, p.addr)) p.txFrames.incrementAndGet() else p.txFail.incrementAndGet() }
         }
     }
 
@@ -237,7 +290,10 @@ class RoomEngine(private val context: Context) {
                 }
             }
             if (frames.isEmpty()) out.fill(0) else Dsp.mix(frames, 1f, out)
+            val t0 = SystemClock.elapsedRealtime()
             if (trk.write(out, 0, FRAME) < 0) SystemClock.sleep(10)   // write blocking = jam putar
+            playFrames.incrementAndGet()
+            playWriteMax.accumulateAndGet((SystemClock.elapsedRealtime() - t0).toInt()) { a, b -> maxOf(a, b) }
         }
     }
 
@@ -251,7 +307,7 @@ class RoomEngine(private val context: Context) {
             try { s.receive(dp) } catch (_: Exception) { break }
             val p = Packet.decode(buf, dp.length) ?: continue
             if (p.room != ROOM || p.sender == myId || wifi.status != WifiStatus.OK) continue
-            if (p.type == PacketType.BYE) { peers.remove(p.sender); continue }
+            if (p.type == PacketType.BYE) { peers.remove(p.sender)?.let { flight?.event("peer_bye name=${it.name}") }; continue }
 
             var isNew = false
             val peer = peers.computeIfAbsent(p.sender) { isNew = true; Peer(it, dp.address) }
@@ -259,10 +315,27 @@ class RoomEngine(private val context: Context) {
             peer.lastSeen = SystemClock.elapsedRealtime()
             // HP yang sama gabung lagi setelah putus mendadak (tanpa BYE) membawa id baru.
             // Satu IP = satu HP, jadi entri lama dengan IP yang sama langsung diganti.
-            if (isNew) peers.values.removeIf { it.id != p.sender && it.addr == dp.address }
+            if (isNew) {
+                flight?.event("peer_new id=${p.sender} addr=${dp.address.hostAddress}")
+                peers.values.removeIf { it.id != p.sender && it.addr == dp.address }
+            }
 
             when (p.type) {
-                PacketType.AUDIO -> peer.buffer.push(p.seq, p.pcm!!, talkStart = p.time == FLAG_TALK_START)
+                PacketType.AUDIO -> {
+                    val talkStart = p.time == FLAG_TALK_START
+                    val now = SystemClock.elapsedRealtime()
+                    // Jeda antar-paket hanya berarti kalau pengirim memang sedang bicara terus.
+                    if (!talkStart && peer.lastAudioAt > 0) peer.rxGapMax.accumulateAndGet((now - peer.lastAudioAt).toInt()) { a, b -> maxOf(a, b) }
+                    peer.lastAudioAt = now
+                    peer.rxAudio.incrementAndGet()
+                    if (!peer.rxHasSeq) { peer.rxHasSeq = true; peer.rxLastSeq = p.seq }
+                    else {
+                        val d = p.seq - peer.rxLastSeq
+                        if (d > 0) { if (d > 1) peer.rxLost.addAndGet(d - 1L); peer.rxLastSeq = p.seq }
+                        else peer.rxReorder.incrementAndGet()
+                    }
+                    peer.buffer.push(p.seq, p.pcm!!, talkStart = talkStart)
+                }
                 PacketType.HELLO -> {
                     peer.name = p.name.ifBlank { "HP" }
                     // IP-nya bisa berubah (DHCP); entri lama bernama sama yang sudah putus = HP ini juga.
@@ -272,6 +345,7 @@ class RoomEngine(private val context: Context) {
                 }
                 PacketType.PING -> send(Packet(PacketType.PONG, ROOM, myId, p.seq, p.time).encode(), peer.addr)
                 PacketType.PONG -> {
+                    peer.pongs.incrementAndGet()
                     val rtt = ((System.nanoTime() - p.time) / 1_000_000).toInt()
                     peer.rttMs = peer.rttMs?.let { (it * 7 + rtt * 3) / 10 } ?: rtt   // rata-rata bergerak
                 }
@@ -291,8 +365,10 @@ class RoomEngine(private val context: Context) {
                 broadcastAddresses().forEach { send(hello, it) }
                 val now = System.nanoTime()
                 sendToPeers(Packet(PacketType.PING, ROOM, myId, tick, now).encode())
+                pingSent.addAndGet(peers.size.toLong())
                 val cutoff = SystemClock.elapsedRealtime() - FORGET_AFTER_MS
-                peers.values.removeIf { it.lastSeen < cutoff }
+                peers.values.filter { it.lastSeen < cutoff }.forEach { peers.remove(it.id); flight?.event("peer_forgotten name=${it.name}") }
+                logSnapshot()
             }
             publish()
             if (tick % 50 == 0) logStats()
@@ -309,9 +385,14 @@ class RoomEngine(private val context: Context) {
         for (p in peers.values) send(data, p.addr)
     }
 
-    private fun send(data: ByteArray, to: InetAddress) {
-        if (wifi.status != WifiStatus.OK) return   // jangan pernah bocor ke WiFi lain
-        try { socket?.send(DatagramPacket(data, data.size, to, PORT)) } catch (_: Exception) { }
+    private fun send(data: ByteArray, to: InetAddress): Boolean {
+        if (wifi.status != WifiStatus.OK) return false   // jangan pernah bocor ke WiFi lain
+        return try {
+            socket?.send(DatagramPacket(data, data.size, to, PORT)); true
+        } catch (e: Exception) {
+            if (sendErr.getAndIncrement() == 0L) flight?.event("send_error ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
     }
 
     private fun broadcastAddresses(): Set<InetAddress> {
@@ -338,6 +419,7 @@ class RoomEngine(private val context: Context) {
             else -> MicRoute.UNKNOWN
         }
         intercomOk = route == MicRoute.BLUETOOTH
+        micInfo = "${route}/${mic?.type}/${(mic?.productName ?: "").toString().replace(' ', '_')}|out=${out?.type}"
         val label = when {
             route == MicRoute.BLUETOOTH -> "Intercom ${Requirements.INTERCOM_NAME}"
             route == MicRoute.PHONE && AudioRouter.isBluetooth(mic) ->
@@ -377,6 +459,46 @@ class RoomEngine(private val context: Context) {
         wifi = w
     }
 
+    /**
+     * Satu baris ringkasan per detik ke FlightLog (+ satu baris per HP lain). Penghitung audio per detik
+     * di-reset di sini; penghitung jitter buffer kumulatif (selisihnya dihitung saat analisis).
+     */
+    @Suppress("DEPRECATION")
+    private fun logSnapshot() {
+        val f = flight ?: return
+        runCatching {
+            val wm = context.applicationContext.getSystemService(WifiManager::class.java)
+            val pm = context.getSystemService(PowerManager::class.java)
+            val ci = wm.connectionInfo
+            val frames = capFrames.getAndSet(0)
+            val dbSum = capDb10.getAndSet(0)
+            val avg = if (frames > 0) dbSum / 10.0 / frames else -90.0
+            val peak = capPeak10.getAndSet(PEAK_NONE).let { if (it == PEAK_NONE) -90.0 else it / 10.0 }
+            val thermal = if (Build.VERSION.SDK_INT >= 29) pm.currentThermalStatus else -1
+            val label = "${wifi.status}/${intercomOk}/${present}"
+            if (label != lastEvt) { f.event("state wifi=${wifi.status} intercom=$intercomOk present=$present"); lastEvt = label }
+            f.line("S wifi=${wifi.status} rssi=${ci?.rssi} link=${ci?.linkSpeed} freq=${ci?.frequency} " +
+                "intercom=${if (intercomOk) 1 else 0} present=${if (present) 1 else 0} muted=${if (muted) 1 else 0} mic=$micInfo " +
+                "seq=$lastSentSeq cap=$frames open=${capOpen.getAndSet(0)} sent=${capSent.getAndSet(0)} floor=${d1(gateFloor)} avg=${d1(avg)} " +
+                "peak=${d1(peak)} readGapMax=${capGapMax.getAndSet(0)} " +
+                "play=${playFrames.getAndSet(0)} writeMax=${playWriteMax.getAndSet(0)} " +
+                "underrun=${track?.underrunCount} " +
+                "sendErr=${sendErr.get()} ping=${pingSent.get()} peers=${peers.size} " +
+                "screen=${if (pm.isInteractive) 1 else 0} thermal=$thermal")
+            val now = SystemClock.elapsedRealtime()
+            for (p in peers.values) {
+                val b = p.buffer
+                if (p.lost != p.wasLost) { p.wasLost = p.lost; f.event("peer_${if (p.lost) "lost" else "back"} name=${p.name}") }
+                f.line("P name=${p.name.replace(' ', '_')} id=${p.id} lost=${if (p.lost) 1 else 0} seenAgo=${now - p.lastSeen} " +
+                    "tx=${p.txFrames.getAndSet(0)} txFail=${p.txFail.get()} rxSeq=${p.rxLastSeq} rxLost=${p.rxLost.get()} reorder=${p.rxReorder.get()} " +
+                    "rx=${p.rxAudio.getAndSet(0)} rxGapMax=${p.rxGapMax.getAndSet(0)} rtt=${p.rttMs} pong=${p.pongs.get()} " +
+                    "target=${b.target} depth=${b.depth()} played=${b.played} missing=${b.missing} late=${b.late} ovf=${b.overflow}")
+            }
+        }
+    }
+
+    private fun d1(x: Double) = String.format(Locale.US, "%.1f", x)
+
     /** Statistik tiap 5 detik: `adb logcat -s Room` setelah uji di jalan untuk melihat sumber putus-putus. */
     private fun logStats() {
         Log.i(TAG, "wifi=${wifi.status} ${wifi.ssid} intercom=$intercomOk peers=${peers.size}")
@@ -395,6 +517,7 @@ class RoomEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "Room"
+        private const val PEAK_NONE = -9000
         const val SAMPLE_RATE = 16_000
         const val FRAME_MS = 20
         const val FRAME = SAMPLE_RATE / 1000 * FRAME_MS

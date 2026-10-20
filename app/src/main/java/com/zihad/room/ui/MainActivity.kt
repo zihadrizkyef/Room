@@ -21,6 +21,7 @@ import com.zihad.room.update.Updater
 class MainActivity : ComponentActivity() {
 
     private var micDenied by mutableStateOf(false)
+    private var updating by mutableStateOf(false)
 
     private val askPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
@@ -33,6 +34,7 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent {
             val state by Room.state.collectAsStateWithLifecycle()
+            if (updating) { UpdatingScreen(); return@setContent }
             RoomScreen(
                 state = state,
                 micDenied = micDenied,
@@ -46,7 +48,7 @@ class MainActivity : ComponentActivity() {
             )
         }
         // Update yang sudah diunduh sesi lalu dipasang sekarang, sebelum obrolan mulai.
-        if (Room.engine == null && Updater.hasStaged(this) && Updater.install(this)) return
+        if (Room.engine == null && Updater.hasStaged(this) && Updater.install(this)) { updating = true; return }
         ensurePermissionsAndStart()
         Updater.checkInBackground(this)
     }
