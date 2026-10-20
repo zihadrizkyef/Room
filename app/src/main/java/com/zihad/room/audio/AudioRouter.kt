@@ -1,7 +1,9 @@
 package com.zihad.room.audio
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -26,6 +28,9 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
     private val am = context.getSystemService(AudioManager::class.java)
     private var scoReceiver: BroadcastReceiver? = null
     private var commListener: Any? = null   // OnCommunicationDeviceChangedListener (API 31+)
+    private var headset: BluetoothHeadset? = null
+    /** X2PLUS tersambung sebagai headset (HFP) — dibaca dari profil Bluetooth, bukan dari nama AudioDeviceInfo. */
+    @Volatile private var intercomConnected = false
     private var scoRequested = false          // startBluetoothSco dihitung per panggilan; jangan dobel
 
     fun start() {
@@ -42,7 +47,33 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
                 IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED), ContextCompat.RECEIVER_EXPORTED)
             scoReceiver = r
         }
+        openHeadsetProxy()
         connectBluetooth()
+    }
+
+    /**
+     * Android 10/11 sering memberi AudioDeviceInfo bernama HP sendiri (bukan nama intercom), jadi
+     * "apakah X2PLUS tersambung" ditanyakan langsung ke profil headset.
+     */
+    @SuppressLint("MissingPermission")
+    private fun openHeadsetProxy() {
+        runCatching {
+            context.getSystemService(BluetoothManager::class.java)?.adapter?.getProfileProxy(context,
+                object : BluetoothProfile.ServiceListener {
+                    override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                        headset = proxy as BluetoothHeadset
+                        refreshHeadset(); onChanged()
+                    }
+                    override fun onServiceDisconnected(profile: Int) { headset = null; intercomConnected = false }
+                }, BluetoothProfile.HEADSET)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun refreshHeadset() {
+        intercomConnected = try {
+            headset?.connectedDevices.orEmpty().any { Requirements.isIntercomName(it.name) }
+        } catch (_: SecurityException) { false }
     }
 
     /** Coba pindahkan ke intercom. Mengembalikan false kalau intercom yang diminta tidak tersambung. */
@@ -58,7 +89,8 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
             }
             return false
         }
-        val hasBt = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { isBluetooth(it) && isIntercom(it) }
+        refreshHeadset()
+        val hasBt = intercomConnected || am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { isBluetooth(it) && isIntercom(it) }
         if (hasBt) {
             if (!scoRequested) {
                 am.isSpeakerphoneOn = false
@@ -81,6 +113,8 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
     fun isIntercom(d: AudioDeviceInfo?): Boolean {
         if (d == null || !isBluetooth(d)) return false
         if (Requirements.isIntercomName(d.productName)) return true
+        // Android ≤ 11 hanya memakai satu headset aktif, jadi kalau X2PLUS tersambung, SCO itu miliknya.
+        if (Build.VERSION.SDK_INT <= 30 && intercomConnected) return true
         if (Build.VERSION.SDK_INT < 28) return false
         val addr = d.address.takeIf { it.isNotBlank() } ?: return false
         return try {
@@ -95,6 +129,8 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
 
     @Suppress("DEPRECATION")
     fun stop() {
+        headset?.let { h -> runCatching { context.getSystemService(BluetoothManager::class.java)?.adapter?.closeProfileProxy(BluetoothProfile.HEADSET, h) } }
+        headset = null; intercomConnected = false
         if (Build.VERSION.SDK_INT >= 31) {
             (commListener as? AudioManager.OnCommunicationDeviceChangedListener)
                 ?.let { am.removeOnCommunicationDeviceChangedListener(it) }
