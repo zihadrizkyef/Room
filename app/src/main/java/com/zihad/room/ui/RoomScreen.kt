@@ -1,6 +1,10 @@
 package com.zihad.room.ui
 
+import android.content.Context
+import android.content.Intent
 import android.graphics.Typeface
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -110,6 +114,31 @@ fun RoomScreen(
     }
 }
 
+@Composable
+private fun ActionButton(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .padding(top = 12.dp)
+            .fillMaxWidth()
+            .height(52.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(C.warn)
+            .clickable(role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Text(label, color = C.signalInk, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+}
+
+/** Android 10+: panel WiFi melayang di atas Room, tinggal ketuk jaringannya. */
+private fun openWifi(c: Context) {
+    val action = if (Build.VERSION.SDK_INT >= 29) Settings.Panel.ACTION_WIFI else Settings.ACTION_WIFI_SETTINGS
+    runCatching { c.startActivity(Intent(action)) }
+        .onFailure { runCatching { c.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) } }
+}
+
+private fun openBluetooth(c: Context) {
+    runCatching { c.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
+}
+
 /** Nomor versi yang sedang jalan (sama dengan tag rilis, mis. v4). */
 @Composable
 private fun versionCode(): Long {
@@ -163,6 +192,8 @@ private fun WifiCard(status: WifiStatus, ssid: String) {
         Text(text, color = C.ink, fontSize = 17.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(top = 4.dp))
         Text("Suara belum dikirim maupun diputar.", color = C.muted, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp))
+        val context = LocalContext.current
+        ActionButton("Pilih WiFi ${Requirements.WIFI_SSID}") { openWifi(context) }
     }
 }
 
@@ -185,6 +216,8 @@ private fun RouteCard(route: MicRoute, label: String) {
             if (warn) {
                 Text("Room hanya jalan dengan intercom ${Requirements.INTERCOM_NAME}, jadi suara belum dikirim maupun diputar. Nyalakan intercom, sambungannya otomatis.",
                     color = C.ink, fontSize = 15.sp, lineHeight = 20.sp, modifier = Modifier.padding(top = 6.dp))
+                val context = LocalContext.current
+                ActionButton("Buka pengaturan Bluetooth") { openBluetooth(context) }
             }
         }
     }
