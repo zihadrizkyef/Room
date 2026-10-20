@@ -74,7 +74,10 @@ class AudioRouter(private val context: Context, private val onChanged: () -> Uni
      * jadi keberadaan intercom dicek ulang ke profil headset. Di Android 12+ rute sudah andal.
      */
     fun intercomPresent(): Boolean {
-        if (Build.VERSION.SDK_INT > 30 || headset == null) return true
+        if (Build.VERSION.SDK_INT > 30) return true
+        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
+        if (adapter != null && !adapter.isEnabled) return false     // Bluetooth dimatikan
+        if (headset == null) { openHeadsetProxy(); return false }   // proxy putus/belum siap: sambung ulang
         refreshHeadset()
         return intercomConnected
     }
